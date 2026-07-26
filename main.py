@@ -77,14 +77,17 @@ _PROFANITY_PATTERNS = [
     # мат "на Б"
     r"бля[дт]?\w*", r"блят\w*", r"заеб\w*", r"уеб\w*", r"еб[ауеё]\w*", r"ебл\w*",
     r"ёб[ауеё]\w*", r"выеб\w*", r"объеб\w*", r"наеб\w*", r"разъеб\w*", r"долбоеб\w*",
-    r"долбоёб\w*", r"мудоеб\w*",
+    r"долбоёб\w*", r"мудоеб\w*", r"їба[тч]\w*", r"довбойоб\w*", r"довбоёб\w*",
+    r"їбан\w*", r"їбл\w*",
     # мат "на П"
     r"пизд\w*", r"спиздел\w*", r"распиздя\w*",
     # мат "на С" / оскорбления
     r"сука\w*", r"сук[иу]\w*", r"суч\w*", r"мудак\w*", r"мудач\w*", r"мудил\w*",
     r"гандон\w*", r"гондон\w*", r"чмо\w*", r"мраз\w*", r"скотин\w*", r"тварь\w*",
     r"урод\w*", r"уёбищ\w*", r"уебищ\w*", r"выродок\w*", r"подонок\w*", r"падла\w*",
-    r"падл[аы]\w*", r"сволоч\w*", r"стерв\w*", r"шлюх\w*", r"шалав\w*",
+    r"падл[аы]\w*", r"сволоч\w*", r"стерв\w*", r"шлюх\w*", r"шалав\w*", r"гнид\w*",
+    r"паскуд\w*", r"мразот\w*", r"вылупок\w*", r"вилупок\w*", r"покидьок\w*",
+    r"хвойд\w*", r"гівн\w*", r"довбойоб\w*", r"курв[аы]\w*", r"быдл\w*", r"бидл\w*",
     # оскорбления интеллекта/внешности
     r"тупиц\w*", r"туп[оа]й\w*", r"идиот\w*", r"дебил\w*", r"даун\w*", r"кретин\w*",
     r"дура\w*", r"дурак\w*", r"придурок\w*", r"придурк\w*", r"ублюдок\w*",
@@ -93,9 +96,10 @@ _PROFANITY_PATTERNS = [
     r"fuck\w*", r"shit\w*", r"bitch\w*", r"asshole\w*", r"bastard\w*",
     r"idiot\w*", r"moron\w*", r"stupid\w*", r"dumbass\w*", r"jerk\w*",
     r"whore\w*", r"slut\w*", r"cunt\w*", r"dick\w*", r"prick\w*", r"retard\w*",
-    r"crap\w*", r"damn\w*", r"douche\w*",
+    r"crap\w*", r"damn\w*", r"douche\w*", r"motherfuck\w*", r"twat\w*",
+    r"wanker\w*", r"scumbag\w*", r"pissed\w*", r"screwed\w*",
 ]
-_PROFANITY_RE = re.compile(r"(?<![a-zа-яё])(?:" + "|".join(_PROFANITY_PATTERNS) + r")", re.IGNORECASE)
+_PROFANITY_RE = re.compile(r"(?<![a-zа-яёіїєґ])(?:" + "|".join(_PROFANITY_PATTERNS) + r")", re.IGNORECASE)
 
 # Словарь "опорных" (базовых) грубых слов для нечёткого поиска — ловит
 # опечатки в одну букву, в т.ч. случайные соседние клавиши на раскладке
@@ -107,6 +111,8 @@ _FUZZY_PROFANITY_WORDS = [
     "долбоеб", "пиздец", "пиздато", "пиздатый", "распиздяй", "мудак", "мудило",
     "гандон", "уебок", "уёбок", "сволочь", "падла", "тварь", "урод", "скотина",
     "чмошник", "придурок", "дебил", "кретин", "идиот", "тупица", "ублюдок",
+    "гнида", "паскуда", "мразота", "выблядок", "довбойоб", "їбати", "курва",
+    "бидло", "быдло", "хвойда", "покидьок",
 ]
 
 
@@ -129,7 +135,7 @@ def _levenshtein_le(a: str, b: str, max_dist: int = 1) -> bool:
     return prev[-1] <= max_dist
 
 
-_WORD_SPLIT_RE = re.compile(r"[a-zа-яё]+", re.IGNORECASE)
+_WORD_SPLIT_RE = re.compile(r"[a-zа-яёіїєґ]+", re.IGNORECASE)
 
 
 def _contains_profanity(text: str) -> bool:
@@ -187,6 +193,76 @@ def _content_summary(message: "Message") -> str:
 
 
 # ----------------------------------------------------------------------
+# Определение ошибок нехватки прав бизнес-подключения при удалении чужих
+# сообщений (.mute/.nomat). Telegram отдельно требует право
+# «Удалять все сообщения» (can_delete_all_messages) — если владелец его не
+# выдал при подключении бота, delete_business_messages падает с ошибкой
+# доступа, и без явного предупреждения это выглядит так, будто мут просто
+# не работает.
+# ----------------------------------------------------------------------
+def _is_business_permission_error(exc: Exception) -> bool:
+    if isinstance(exc, TelegramForbiddenError):
+        return True
+    text = str(exc).lower()
+    return any(hint in text for hint in ("right", "permission", "not enough"))
+
+
+_delete_perm_warned: set[int] = set()
+
+
+async def _warn_delete_permission_once(bot: "Bot", owner_id: int) -> None:
+    """Предупреждает владельца ОДИН раз за время работы процесса о том, что
+    удаление чужих сообщений (.mute/.nomat) не работает из-за нехватки прав."""
+    if owner_id in _delete_perm_warned:
+        return
+    _delete_perm_warned.add(owner_id)
+    try:
+        await bot.send_message(
+            owner_id,
+            "⚠️ Не получилось удалить сообщение собеседника — не хватает прав бизнес-подключения.\n\n"
+            "Переподключите бота: Настройки → Telegram для бизнеса → Чат-боты → откройте бота и "
+            "обязательно разрешите пункт «Удалять все сообщения». Без него команды .mute и .nomat "
+            "не могут удалять входящие сообщения собеседника.",
+        )
+    except Exception:
+        logger.exception("Failed to notify owner_id=%s about delete permission issue", owner_id)
+
+
+async def _delete_business_message_hard(bot: "Bot", connection_id: str, message_id: int, owner_id: int) -> bool:
+    """«Жёсткое» удаление для .mute: пробует удалить сообщение, и если
+    получает временную ошибку (флуд-контрол / сетевой сбой), повторяет
+    попытку ещё раз вместо того, чтобы сразу сдаться. Возвращает True, если
+    сообщение реально удалено."""
+    for attempt in range(2):
+        try:
+            await bot.delete_business_messages(
+                business_connection_id=connection_id, message_ids=[message_id]
+            )
+            return True
+        except TelegramRetryAfter as exc:
+            if attempt == 0:
+                await asyncio.sleep(min(exc.retry_after, 3))
+                continue
+            logger.exception("Delete retry-after exhausted, message_id=%s", message_id)
+            return False
+        except TelegramNetworkError:
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+                continue
+            logger.exception("Delete network error exhausted retries, message_id=%s", message_id)
+            return False
+        except (TelegramBadRequest, TelegramForbiddenError) as exc:
+            logger.exception("Failed to delete business message, message_id=%s", message_id)
+            if _is_business_permission_error(exc):
+                await _warn_delete_permission_once(bot, owner_id)
+            return False
+        except Exception:
+            logger.exception("Unexpected error deleting business message, message_id=%s", message_id)
+            return False
+    return False
+
+
+# ----------------------------------------------------------------------
 # Поиск картинки по тексту через Яндекс.Картинки для команды .ynd.
 # ВАЖНО: это лёгкий HTML-скрейпинг публичной страницы поиска (без
 # официального API — у Яндекса нет бесплатного публичного API картиночного
@@ -227,6 +303,48 @@ async def _yandex_image_search(query: str) -> Optional[bytes]:
                 return data
     except Exception:
         logger.exception("Yandex image search failed for query=%r", query)
+        return None
+
+
+async def _yandex_reverse_image_search(source_url: str) -> Optional[bytes]:
+    """Поиск ПОХОЖИХ картинок по фото через Яндекс.Картинки (rpt=imageview),
+    для .ynd, когда команда отправлена ОТВЕТОМ на фото (без текста запроса).
+    source_url — публичная ссылка на файл (например, ссылка на файл Telegram
+    Bot API), которую Яндекс сможет скачать сам, чтобы найти похожие."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout, headers=_YND_HEADERS) as session:
+            async with session.get(
+                "https://yandex.ru/images/search",
+                params={"rpt": "imageview", "url": source_url},
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+            matches = _YND_IMG_RE.findall(html)
+            if not matches:
+                return None
+            # Первый результат обычно сама исходная картинка (raw url в
+            # реверс-поиске Яндекс часто отражает загруженное фото первым
+            # пунктом) — берём первый результат, который реально отличается
+            # от исходной ссылки, иначе просто первый найденный.
+            img_url = None
+            for m in matches:
+                candidate = m.replace("\\/", "/")
+                if candidate != source_url:
+                    img_url = candidate
+                    break
+            if not img_url:
+                img_url = matches[0].replace("\\/", "/")
+            async with session.get(img_url) as img_resp:
+                if img_resp.status != 200:
+                    return None
+                data = await img_resp.read()
+                if len(data) < 512:
+                    return None
+                return data
+    except Exception:
+        logger.exception("Yandex reverse image search failed for source_url=%r", source_url)
         return None
 
 
@@ -687,6 +805,9 @@ STYLE_KEYS: list[tuple[str, str]] = [
     ("channel_check", "Я подписался"),
     ("admin_channel", "Админ: Канал"),
     ("admin_users", "Админ: Пользователи"),
+    ("admin_promo", "Админ: Промокоды"),
+    ("my_stats", "Кнопка: Статистика (пользователь)"),
+    ("buy_sub", "Кнопка: Купить подписку"),
     ("mute", "Кнопка/статус Мут"),
     ("unmute", "Кнопка Размутить"),
     ("xo_start", "Крестики-нолики: старт"),
@@ -741,6 +862,9 @@ DEFAULT_BUTTON_STYLES: dict[str, str] = {
     "channel_check": "success",
     "admin_channel": "primary",
     "admin_users": "primary",
+    "admin_promo": "primary",
+    "my_stats": "primary",
+    "buy_sub": "success",
     "mute": "danger",
     "unmute": "success",
     "xo_start": "primary",
@@ -783,6 +907,7 @@ BUTTON_EMOJI_HINTS: dict[str, str] = {
     "admin_style": "🎨", "admin_rename": "✏️", "admin_emoji": "🌟",
     "admin_grant": "🎁", "admin_revoke": "🚫", "admin_channel": "📢",
     "admin_broadcast": "📣", "admin_stats": "📊", "admin_oferta": "📄",
+    "admin_promo": "🎁", "my_stats": "📊", "buy_sub": "💳",
 }
 
 
@@ -1006,6 +1131,28 @@ class Database:
                     flag TEXT NOT NULL,
                     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
                     PRIMARY KEY (owner_user_id, chat_id, flag)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS promo_codes (
+                    code TEXT PRIMARY KEY,
+                    days INTEGER NOT NULL,
+                    max_activations INTEGER NOT NULL,
+                    activations_count INTEGER NOT NULL DEFAULT 0,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS promo_activations (
+                    code TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    activated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                    PRIMARY KEY (code, user_id)
                 )
                 """
             )
@@ -1510,6 +1657,55 @@ class Database:
                 WHERE game_id = ?
                 """,
                 (board, turn, status, game_id),
+            )
+
+    # -- promo codes (генерируются в админке: сколько дней подписки дают и
+    # сколько РАЗНЫХ пользователей суммарно могут их активировать) --------
+    def create_promo(self, code: str, days: int, max_activations: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO promo_codes (code, days, max_activations) VALUES (?, ?, ?)",
+                (code, days, max_activations),
+            )
+
+    def get_promo(self, code: str) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM promo_codes WHERE code = ?", (code,)
+            ).fetchone()
+
+    def list_promos(self) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM promo_codes ORDER BY created_at DESC"
+            ).fetchall()
+
+    def delete_promo(self, code: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute("DELETE FROM promo_codes WHERE code = ?", (code,))
+            conn.execute("DELETE FROM promo_activations WHERE code = ?", (code,))
+            return cur.rowcount > 0
+
+    def has_activated_promo(self, code: str, user_id: int) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM promo_activations WHERE code = ? AND user_id = ?",
+                (code, user_id),
+            ).fetchone()
+            return row is not None
+
+    def activate_promo(self, code: str, user_id: int) -> None:
+        """Записывает активацию и увеличивает счётчик. Вызывать только после
+        всех проверок (существует/активен/лимит/не активировал раньше) —
+        сами проверки выполняются в хендлере, здесь только запись."""
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO promo_activations (code, user_id) VALUES (?, ?)",
+                (code, user_id),
+            )
+            conn.execute(
+                "UPDATE promo_codes SET activations_count = activations_count + 1 WHERE code = ?",
+                (code,),
             )
 
 
@@ -2224,19 +2420,29 @@ def build_toggle_keyboard(db: Database, enabled: bool) -> InlineKeyboardMarkup:
         btn = _btn(db, "toggle_off", "Выключить", callback_data="toggle_off")
     else:
         btn = _btn(db, "toggle_on", "Включить", callback_data="toggle_on")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [btn],
+            [_btn(db, "ref_info", "🎁 Реферальная программа", callback_data="ref_info")],
+            [
+                _btn(db, "my_stats", "📊 Статистика", callback_data="my_stats"),
+                _btn(db, "settings", "⚙️ Настройки", callback_data="open_settings"),
+            ],
+            [_btn(db, "support", "✨ Поддержка", callback_data="show_support")],
+            [_btn(db, "buy_sub", "💳 Купить подписку", callback_data="buy_sub")],
+            *build_oferta_row(db),
+        ]
+    )
+
+
+def build_buy_sub_keyboard(db: Database) -> InlineKeyboardMarkup:
     price_stars = db.get_price_stars()
     price_usdt = db.get_price_usdt()
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [btn],
-            [_btn(db, "pay_stars", f"Продлить подписку — {price_stars}⭐️", callback_data="pay_stars")],
-            [_btn(db, "pay_crypto", f"Оплатить подписку — {price_usdt}$ крипта", callback_data="pay_crypto")],
-            [_btn(db, "settings", "Настройки", callback_data="open_settings")],
-            [_btn(db, "commands_info", "📜 Команды", callback_data="commands_info")],
-            [_btn(db, "ref_info", "🔗 Пригласить друга", callback_data="ref_info")],
-            [_btn(db, "xo_free", "🎮 Крестики-нолики", callback_data="xof_new")],
-            build_info_row(db),
-            *build_oferta_row(db),
+            [_btn(db, "pay_stars", f"⭐️ {price_stars} Stars", callback_data="pay_stars")],
+            [_btn(db, "pay_crypto", f"💎 {price_usdt}$ крипта", callback_data="pay_crypto")],
+            [_btn(db, "back", "Закрыть", callback_data="close_info")],
         ]
     )
 
@@ -2262,7 +2468,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "nomat": ".nomat — автоматически удаляет сообщения собеседника с матом/оскорблениями. Выключить: кнопка ниже либо .unomat.",
     "kind": ".kind — ваши сообщения с матом/оскорблениями бот незаметно заменяет на доброжелательные с эмодзи. Выключить: кнопка ниже либо .unkind.",
     "help_chat": ".help — присылает список этих же команд прямо в подключённый чат.",
-    "ynd": ".ynd запрос — ищет картинку по тексту в Яндекс.Картинках и присылает её в чат (например: .ynd машина).",
+    "ynd": ".ynd запрос — ищет картинку по тексту в Яндекс.Картинках и присылает её в чат (например: .ynd машина). Также можно ответить командой .ynd (без текста) на фото — найдёт похожие картинки.",
 }
 
 
@@ -2401,6 +2607,7 @@ def build_admin_menu_keyboard(db: Database) -> InlineKeyboardMarkup:
         [_btn(db, "admin_texts", "Тексты бота", callback_data="admin_texts")],
         [_btn(db, "admin_channel", "Обязательный канал", callback_data="admin_channel")],
         [_btn(db, "admin_users", "Пользователи", callback_data="admin_users:0")],
+        [_btn(db, "admin_promo", "🎁 Промокоды", callback_data="admin_promo")],
         [_btn(db, "admin_stats", "Статистика", callback_data="admin_stats")],
         [_btn(db, "back", "Назад", callback_data="back_to_start")],
     ]
@@ -2409,6 +2616,27 @@ def build_admin_menu_keyboard(db: Database) -> InlineKeyboardMarkup:
 
 def build_back_keyboard(db: Database, callback_data: str = "admin_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_btn(db, "back", "Назад", callback_data=callback_data)]])
+
+
+def build_admin_promo_keyboard(db: Database) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(db, "admin_promo_create", "➕ Создать промокод", callback_data="admin_promo_create")],
+            [_btn(db, "admin_promo_list", "📋 Список промокодов", callback_data="admin_promo_list")],
+            [_btn(db, "back", "Назад", callback_data="admin_menu")],
+        ]
+    )
+
+
+def build_promo_list_keyboard(db: Database, promos: list) -> InlineKeyboardMarkup:
+    rows = []
+    for p in promos:
+        label = f"{p['code']} · {p['activations_count']}/{p['max_activations']} · {p['days']}дн."
+        if not p["active"]:
+            label = "🚫 " + label
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"admin_promo_del:{p['code']}")])
+    rows.append([_btn(db, "back", "Назад", callback_data="admin_promo")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ======================================================================
@@ -2432,6 +2660,8 @@ class AdminStates(StatesGroup):
     waiting_channel = State()
     waiting_all_emoji_value = State()
     waiting_button_rename_value = State()
+    waiting_promo_days = State()
+    waiting_promo_max = State()
 
 
 class UserStates(StatesGroup):
@@ -2603,6 +2833,34 @@ def register_user_handlers(
         db.upsert_user(user_id, message.from_user.first_name or "", message.from_user.username)
         await show_start_screen(message.bot, db, settings, user_id)
 
+    @dp.message(Command("promo"))
+    async def handle_promo_cmd(message: Message, command: CommandObject) -> None:
+        user_id = message.from_user.id
+        db.upsert_user(user_id, message.from_user.first_name or "", message.from_user.username)
+        code = (command.args or "").strip().upper()
+        if not code:
+            await message.answer("Использование: <code>/promo КОД</code>", parse_mode="HTML")
+            return
+        row = db.get_promo(code)
+        if not row or not row["active"]:
+            await message.answer("🚫 Такого промокода не существует или он уже деактивирован.")
+            return
+        if row["activations_count"] >= row["max_activations"]:
+            await message.answer("🚫 У этого промокода закончился лимит активаций.")
+            return
+        if db.has_activated_promo(code, user_id):
+            await message.answer("Вы уже активировали этот промокод ранее.")
+            return
+        db.activate_promo(code, user_id)
+        days = row["days"]
+        new_until = db.grant_subscription(user_id, days)
+        until_str = datetime.fromtimestamp(new_until).strftime("%d.%m.%Y")
+        await message.answer(
+            f"🎁 Промокод активирован!\nНачислено: <b>{days} {_days_word(days)}</b> подписки.\n"
+            f"Действует до <b>{until_str}</b>.",
+            parse_mode="HTML",
+        )
+
     @dp.message(Command("help"))
     async def handle_help_cmd(message: Message) -> None:
         text = (
@@ -2626,7 +2884,8 @@ def register_user_handlers(
             "(выключается кнопкой либо .unomat)\n"
             "💐 .kind — ваши сообщения с матом/оскорблениями бот заменяет на доброжелательные "
             "(выключается кнопкой либо .unkind)\n"
-            "🖼 .ynd запрос — найти и прислать картинку по запросу, например: .ynd машина"
+            "🖼 .ynd запрос — найти и прислать картинку по запросу, например: .ynd машина. "
+            "Ответом на фото (без текста) — найдёт похожие картинки"
             "</blockquote>\n\n"
             "<i>Эти команды нужно отправлять как сообщение в подключённом чате — они "
             "автоматически удаляются ботом.</i>"
@@ -2674,6 +2933,40 @@ def register_user_handlers(
             f"Приглашено (подключили бота): <b>{count}</b>"
         )
         await callback.message.answer(text, parse_mode="HTML", reply_markup=build_back_keyboard(db, "back_to_start"))
+        await callback.answer()
+
+    @dp.callback_query(F.data == "my_stats")
+    async def handle_my_stats(callback: CallbackQuery) -> None:
+        user_id = callback.from_user.id
+        row = db.get_user(user_id)
+        is_owner = user_id == settings.owner_id
+        is_connected = bool(row and row["business_connection_id"])
+        is_enabled = bool(row and row["enabled"])
+        ref_count = db.count_referrals(user_id)
+        if is_owner or db.is_subscribed(user_id, settings.owner_id):
+            sub_until = row["sub_until"] if row else None
+            if sub_until:
+                sub_text = f"активна до <b>{datetime.fromtimestamp(sub_until).strftime('%d.%m.%Y')}</b>"
+            else:
+                sub_text = "активна (владелец)" if is_owner else "активна"
+        else:
+            sub_text = "не активна"
+        text = (
+            "<b>📊 Статистика</b>\n\n"
+            f"Подключение: {'✅ подключено' if is_connected else '❌ не подключено'}\n"
+            f"Время в нике: {'включено' if is_enabled else 'выключено'}\n"
+            f"Подписка: {sub_text}\n"
+            f"Приглашено друзей: <b>{ref_count}</b>"
+        )
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=build_back_keyboard(db, "back_to_start"))
+        await callback.answer()
+
+    @dp.callback_query(F.data == "buy_sub")
+    async def handle_buy_sub(callback: CallbackQuery) -> None:
+        await callback.message.answer(
+            "<b>💳 Купить подписку</b>\n\nВыберите способ оплаты:",
+            parse_mode="HTML", reply_markup=build_buy_sub_keyboard(db),
+        )
         await callback.answer()
 
     @dp.message(F.text == "Главная")
@@ -2974,29 +3267,46 @@ def register_user_handlers(
 
             if text.startswith(".ynd"):
                 query = text[len(".ynd"):].strip()
+                reply_photo = None
+                if message.reply_to_message and message.reply_to_message.photo:
+                    reply_photo = message.reply_to_message.photo[-1]
                 try:
                     await message.bot.delete_business_messages(
                         business_connection_id=connection_id, message_ids=[message.message_id]
                     )
                 except Exception:
                     logger.exception("Failed to delete .ynd command message, chat_id=%s", chat_id)
-                if not query:
+                if not query and not reply_photo:
                     try:
                         await message.bot.send_message(
                             chat_id=chat_id,
                             business_connection_id=connection_id,
-                            text="Формат команды: .ynd запрос, например: .ynd машина",
+                            text=(
+                                "Формат команды: .ynd запрос, например: .ynd машина\n"
+                                "Либо ответьте командой .ynd (без текста) на фото — найду похожие картинки."
+                            ),
                         )
                     except Exception:
                         logger.exception("Failed to send .ynd usage hint, chat_id=%s", chat_id)
                     return
-                img_bytes = await _yandex_image_search(query)
+                if reply_photo and not query:
+                    try:
+                        file = await message.bot.get_file(reply_photo.file_id)
+                        file_url = f"https://api.telegram.org/file/bot{settings.bot_token}/{file.file_path}"
+                    except Exception:
+                        logger.exception("Failed to resolve file url for .ynd reverse search, chat_id=%s", chat_id)
+                        file_url = None
+                    img_bytes = await _yandex_reverse_image_search(file_url) if file_url else None
+                    not_found_text = "Не удалось найти похожую картинку. Попробуйте другое фото."
+                else:
+                    img_bytes = await _yandex_image_search(query)
+                    not_found_text = f"Не удалось найти картинку по запросу «{escape(query)}». Попробуйте другой запрос."
                 if not img_bytes:
                     try:
                         await message.bot.send_message(
                             chat_id=chat_id,
                             business_connection_id=connection_id,
-                            text=f"Не удалось найти картинку по запросу «{escape(query)}». Попробуйте другой запрос.",
+                            text=not_found_text,
                         )
                     except Exception:
                         logger.exception("Failed to send .ynd not-found notice, chat_id=%s", chat_id)
@@ -3099,37 +3409,26 @@ def register_user_handlers(
 
         # Сообщение от собеседника.
         if db.is_chat_muted(owner_id, chat_id):
+            deleted = await _delete_business_message_hard(message.bot, connection_id, message.message_id, owner_id)
+            # Владельцу пересылаем содержимое в ЛС в любом случае, чтобы он не
+            # терял переписку — но если удалить не получилось, честно
+            # предупреждаем об этом прямо в пересылке (не только один раз выше).
             try:
-                await message.bot.delete_business_messages(
-                    business_connection_id=connection_id, message_ids=[message.message_id]
+                who = message.from_user.first_name if message.from_user else "Собеседник"
+                prefix = "🔇 Удалено (собеседник замучен)" if deleted else "⚠️ НЕ удалено (не хватает прав, собеседник замучен)"
+                await message.bot.send_message(
+                    owner_id,
+                    f"{prefix}\n<b>{escape(who)}</b>: {escape(_content_summary(message))}",
+                    parse_mode="HTML",
                 )
             except Exception:
-                logger.exception(
-                    "Failed to delete muted interlocutor message, chat_id=%s owner_id=%s", chat_id, owner_id
-                )
-            else:
-                # Удалённое сообщение всё равно приходит владельцу в ЛС с
-                # ботом, чтобы он не терял переписку, пока собеседник замучен.
-                try:
-                    who = message.from_user.first_name if message.from_user else "Собеседник"
-                    await message.bot.send_message(
-                        owner_id,
-                        f"🔇 Удалено (собеседник замучен)\n<b>{escape(who)}</b>: {escape(_content_summary(message))}",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    logger.exception("Failed to forward muted message to owner_id=%s", owner_id)
+                logger.exception("Failed to forward muted message to owner_id=%s", owner_id)
             return
 
         text = (message.text or message.caption or "").strip()
 
         if db.has_chat_flag(owner_id, chat_id, "nomat") and _contains_profanity(text):
-            try:
-                await message.bot.delete_business_messages(
-                    business_connection_id=connection_id, message_ids=[message.message_id]
-                )
-            except Exception:
-                logger.exception("Failed to delete profane interlocutor message, chat_id=%s", chat_id)
+            await _delete_business_message_hard(message.bot, connection_id, message.message_id, owner_id)
             return
 
         if db.has_chat_flag(owner_id, chat_id, "clone") and text:
@@ -3141,6 +3440,27 @@ def register_user_handlers(
                 )
             except Exception:
                 logger.exception("Failed to clone interlocutor message, chat_id=%s", chat_id)
+
+    # Жёсткий мут: если собеседник ОТРЕДАКТИРОВАЛ уже отправленное сообщение
+    # (например, пытаясь обойти удаление), Telegram присылает отдельное
+    # событие edited_business_message — обрабатываем его так же строго:
+    # пока чат замучен, любое сообщение собеседника (включая отредактированное)
+    # должно быть удалено.
+    if hasattr(dp, "edited_business_message"):
+        @dp.edited_business_message()
+        async def handle_edited_business_message(message: Message) -> None:
+            connection_id = message.business_connection_id
+            if not connection_id:
+                return
+            row = db.get_user_by_connection(connection_id)
+            if not row:
+                return
+            owner_id = row["user_id"]
+            chat_id = message.chat.id
+            if message.from_user and message.from_user.id == owner_id:
+                return
+            if db.is_chat_muted(owner_id, chat_id):
+                await _delete_business_message_hard(message.bot, connection_id, message.message_id, owner_id)
 
     def _resolve_business_owner(callback: CallbackQuery) -> Optional[sqlite3.Row]:
         """Определяет владельца бизнес-аккаунта, к которому относится чат
@@ -4432,6 +4752,97 @@ def register_admin_handlers(dp: Dispatcher, db: Database, settings: Settings) ->
             db.set_setting(settings_key, message.html_text or raw)
         await state.clear()
         await message.answer("✅ Текст обновлён.", reply_markup=build_back_keyboard(db, "admin_texts"))
+
+    @dp.callback_query(F.data == "admin_promo")
+    async def handle_admin_promo(callback: CallbackQuery) -> None:
+        if not _is_owner(callback.from_user.id, settings):
+            await callback.answer()
+            return
+        await callback.message.edit_text(
+            "<b>🎁 Промокоды</b>\n\n"
+            "Создавайте промокоды, задавая сколько дней подписки они дают и "
+            "сколько РАЗНЫХ пользователей суммарно могут их активировать.",
+            parse_mode="HTML", reply_markup=build_admin_promo_keyboard(db),
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data == "admin_promo_create")
+    async def handle_admin_promo_create(callback: CallbackQuery, state: FSMContext) -> None:
+        if not _is_owner(callback.from_user.id, settings):
+            await callback.answer()
+            return
+        await state.set_state(AdminStates.waiting_promo_days)
+        await callback.message.edit_text(
+            "Сколько дней подписки должен давать этот промокод?", reply_markup=build_back_keyboard(db, "admin_promo"),
+        )
+        await callback.answer()
+
+    @dp.message(AdminStates.waiting_promo_days)
+    async def handle_promo_days_input(message: Message, state: FSMContext) -> None:
+        try:
+            days = int((message.text or "").strip())
+            if days <= 0:
+                raise ValueError
+        except ValueError:
+            await message.answer("Введите положительное целое число дней.")
+            return
+        await state.update_data(promo_days=days)
+        await state.set_state(AdminStates.waiting_promo_max)
+        await message.answer("Сколько РАЗНЫХ пользователей суммарно смогут активировать этот промокод?")
+
+    @dp.message(AdminStates.waiting_promo_max)
+    async def handle_promo_max_input(message: Message, state: FSMContext) -> None:
+        try:
+            max_activations = int((message.text or "").strip())
+            if max_activations <= 0:
+                raise ValueError
+        except ValueError:
+            await message.answer("Введите положительное целое число активаций.")
+            return
+        data = await state.get_data()
+        days = data["promo_days"]
+        code = secrets.token_hex(4).upper()
+        db.create_promo(code, days, max_activations)
+        await state.clear()
+        await message.answer(
+            f"✅ Промокод создан: <code>{code}</code>\n"
+            f"Даёт: <b>{days} {_days_word(days)}</b> подписки\n"
+            f"Лимит активаций: <b>{max_activations}</b>\n\n"
+            f"Активировать: <code>/promo {code}</code>",
+            parse_mode="HTML", reply_markup=build_back_keyboard(db, "admin_promo"),
+        )
+
+    @dp.callback_query(F.data == "admin_promo_list")
+    async def handle_admin_promo_list(callback: CallbackQuery) -> None:
+        if not _is_owner(callback.from_user.id, settings):
+            await callback.answer()
+            return
+        promos = db.list_promos()
+        if not promos:
+            await callback.message.edit_text(
+                "Промокодов пока нет.", reply_markup=build_admin_promo_keyboard(db),
+            )
+            await callback.answer()
+            return
+        await callback.message.edit_text(
+            "<b>📋 Промокоды</b>\n\nНажмите на промокод, чтобы удалить его.",
+            parse_mode="HTML", reply_markup=build_promo_list_keyboard(db, promos),
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("admin_promo_del:"))
+    async def handle_admin_promo_del(callback: CallbackQuery) -> None:
+        if not _is_owner(callback.from_user.id, settings):
+            await callback.answer()
+            return
+        code = callback.data.split(":", 1)[1]
+        db.delete_promo(code)
+        await callback.answer(f"Промокод {code} удалён.", show_alert=True)
+        promos = db.list_promos()
+        if not promos:
+            await callback.message.edit_text("Промокодов пока нет.", reply_markup=build_admin_promo_keyboard(db))
+        else:
+            await callback.message.edit_reply_markup(reply_markup=build_promo_list_keyboard(db, promos))
 
     @dp.callback_query(F.data == "admin_stats")
     async def handle_admin_stats(callback: CallbackQuery) -> None:
